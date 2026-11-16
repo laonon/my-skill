@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+dvctl — 开发机部署控制台 CLI
+
+通过 HTTPS API 操作 https://guide.realsee.cn/apps/console/，
+不需要 SSH，适合 AI 直接调用。
+
+用法:
+  dvctl apps                       列出所有应用
+  dvctl overview                   主机资源概览
+  dvctl ports                      端口分配
+  dvctl vibe                       创意工坊应用（只读）
+  dvctl deploy <路径> --name <名>   上传 zip / 目录并部署（自动识别类型）
+                  [--update]        覆盖更新（同名已存在时默认就是更新，可省略）
+                  [--mysql]         同时建库并注入容器
+                  [--owner <id>]    指定发布者账号 id（默认取 .env 的 CONSOLE_OWNER）
+                  [--owner-name <名字>]
+  dvctl whoami                     看令牌身份与发布归属配置
+  dvctl login [--token <令牌>]     换成自己的访问令牌（之后发布都归自己）
+  dvctl image --name <名> --image <镜像> [--port 6001] [--cport 3000]
+  dvctl logs <名> [-n 200]
+  dvctl restart|stop|start|rollback|remove <名> [-y]
+  dvctl open <名>                  打印访问地址
+  dvctl doctor                     检查连通性与令牌
+
+数据库: deploy / image 都可加 --mysql，自动建库（app_<名>）并注入容器
+通用参数: --json 输出原始 JSON
+"""
+import sys, os, json, zipfile, tempfile, mimetypes, uuid, ssl, shutil
+import urllib.request, urllib.error, urllib.parse
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ENV_FILE = os.path.join(os.path.dirname(HERE), '.env')
+
+DEFAULTS = {
+    'CONSOLE_URL': 'https://guide.realsee.cn/apps/console',
+    'CONSOLE_TOKEN': '',
+    # 归属：用共享的管理员令牌发布时，声明「这批应用算谁的」。
+    # 不填就会记到 admin（脚本身份），控制台里看不到真实发布者。
+    'CONSOLE_OWNER': '',
+    'CONSOLE_OWNER_NAME': '',
+}
+
+
+def load_env():
+    cfg = dict(DEFAULTS)
+    if os.path.exists(ENV_FILE):
+        for line in open(ENV_FILE, encoding='utf-8'):
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, v = line.split('=', 1)
+            cfg[k.strip()] = v.strip().strip('"').strip("'")
+    for k in list(cfg):
+        if os.environ.get(k):
+            cfg[k] = os.environ[k]
+    return cfg
+
+
+CFG = load_env()
+BASE = CFG['CONSOLE_URL'].rstrip('/')
+TOKEN = CFG['CONSOLE_TOKEN']
+JSON_OUT = '--json' in sys.argv
+
+# 自签 CA：OpenSSL 不读 macOS 钥匙串，需显式指定。首次自动获取并固定指纹。
+CA_FILE = os.path.join(os.path.dirname(HERE), 'ca.crt')
+CA_FP = 'E355244FF550F324A96F2755E162CFA2CA453218C81B8D5D4D8B91923E38D820'
+_SSL_CTX = None
+
+
+def ca_fingerprint(path):
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ['openssl', 'x509', '-in', path, '-noout', '-fingerprint', '-sha256'],
+            stderr=subprocess.DEVNULL).decode()
+        return out.split('=', 1)[1].strip().replace(':', '').upper()
+    except Exception:
+        return ''
+
+
+def bootstrap_ca():
+    """从站点下载根 CA（此时尚无信任，只校验指纹）"""
+    from urllib.parse import urlparse
+    u = urlparse(BASE)
+    ca_url = '%s://%s/realsee-devbox-ca.crt' % (u.scheme, u.netloc)
+    try:
+        insecure = ssl.create_default_context()
+        insecure.check_hostname = False
+        insecure.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(ca_url, timeout=15, context=insecure) as r:
+            data = r.read()
+        tmp = CA_FILE + '.tmp'
+        open(tmp, 'wb').write(data)
+        fp = ca_fingerprint(tmp)
+        if fp != CA_FP:
+            os.remove(tmp)
+            return False
+        os.replace(tmp, CA_FILE)
+        os.chmod(CA_FILE, 0o644)
+        return True
+    except Exception:
+        return False
+
+
+def ssl_ctx():
+    global _SSL_CTX
+    if _SSL_CTX is not None:
+        return _SSL_CTX
+    if not BASE.startswith('https'):
+        _SSL_CTX = ssl.create_default_context()
+        return _SSL_CTX
+    if os.environ.get('CONSOLE_INSECURE') == '1':
+        c = ssl.create_default_context()
+        c.check_hostname = False
+        c.verify_mode = ssl.CERT_NONE
+        _SSL_CTX = c
+        return c
+    ca = os.environ.get('CONSOLE_CA') or (CA_FILE if os.path.exists(CA_FILE) else None)
+    if not ca and bootstrap_ca():
+        ca = CA_FILE
+    if not ca:
+        die('无法获取受信任的 CA。\n'
+            '  手动下载 %s/realsee-devbox-ca.crt 放到 %s\n'
+            '  或设置 CONSOLE_CA=/path/to/ca.crt，临时跳过校验用 CONSOLE_INSECURE=1' % (BASE, CA_FILE))
+    _SSL_CTX = ssl.create_default_context(cafile=ca)
+    return _SSL_CTX
+
+
+def die(msg, code=1):
+    sys.stderr.write('错误: %s\n' % msg)
+    sys.exit(code)
+
+
+def req(path, method='GET', data=None, ctype='application/json', timeout=600):
+    url = BASE + '/api/' + path.lstrip('/')
+    body = None
+    if data is not None:
+        body = data if isinstance(data, bytes) else json.dumps(data).encode()
+    r = urllib.request.Request(url, data=body, method=method)
+    if TOKEN:
+        r.add_header('Authorization', 'Bearer ' + TOKEN)
+    if body is not None:
+        r.add_header('Content-Type', ctype)
+    try:
+        with urllib.request.urlopen(r, timeout=timeout, context=ssl_ctx()) as resp:
+            raw = resp.read()
+            return json.loads(raw.decode('utf-8') or '{}')
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode('utf-8', 'replace')
+        try:
+            d = json.loads(raw)
+        except Exception:
+            d = {'error': raw[:400]}
+        if e.code == 401:
+            die('令牌无效或未配置。检查 %s 中的 CONSOLE_TOKEN' % ENV_FILE)
+        d['_status'] = e.code
+        return d
+    except urllib.error.URLError as e:
+        die('连接失败 %s\n  %s\n  检查网络，或改用 dbx 走 SSH 兜底' % (BASE, e.reason))
+
+
+
+def dwidth(s):
+    """终端显示宽度：CJK 算 2 列"""
+    return sum(2 if ord(c) > 0x2E80 else 1 for c in str(s))
+
+
+def pad(s, n):
+    s = str(s)
+    return s + ' ' * max(0, n - dwidth(s))
+
+
+def out(obj):
+    print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+
+# ---------- 命令 ----------
+def cmd_apps():
+    apps = req('apps')
+    if JSON_OUT:
+        return out(apps)
+    if not apps:
+        print('（还没有部署任何应用）')
+        return
+    print(pad('应用', 20) + pad('类型', 9) + pad('状态', 10) + pad('端口', 8) + '访问')
+    print('-' * 78)
+    for a in apps:
+        st = {'running': '运行中', 'exited': '已停止', 'not-created': '未创建',
+              'restarting': '重启中', 'paused': '已暂停'}.get(a['state'], a['state'])
+        print(pad(a['name'], 20) + pad(a['type'], 9) + pad(st, 10) +
+              pad(a.get('port') or '-', 8) + a['access'])
+
+
+def cmd_overview():
+    o = req('overview')
+    if JSON_OUT:
+        return out(o)
+    d = o.get('disk') or {}
+    mem = o['memTotal'] - o['memFree']
+    print('主机     %s' % o['host'])
+    print('运行     %s 小时' % o['uptime'])
+    print('CPU      %s 核，负载 %s' % (o['cpus'], o['load']))
+    print('内存     %s / %s GB' % (mem, o['memTotal']))
+    print('磁盘     %s / %s (%s)' % (d.get('used', '-'), d.get('size', '-'), d.get('pct', '-')))
+    print('容器     %s 个' % len(o.get('containers', {})))
+    print('Docker   %s' % ('正常' if o.get('dockerOk') else '异常'))
+
+
+def cmd_ports():
+    rows = req('ports')
+    if JSON_OUT:
+        return out(rows)
+    if not rows:
+        print('（暂无端口登记）')
+        return
+    print(pad('端口', 8) + pad('应用', 22) + pad('容器端口', 11) + pad('日期', 13) + '负责人')
+    print('-' * 74)
+    for r in rows:
+        print(pad(r[0], 8) + pad(r[1], 22) + pad(r[2] if len(r) > 2 else '-', 11) +
+              pad(r[3] if len(r) > 3 else '-', 13) + (r[4] if len(r) > 4 else '-'))
+
+
+def cmd_vibe():
+    """创意工坊（vibe-release）应用，只读"""
+    apps = req('vibe')
+    if JSON_OUT:
+        return out(apps)
+    if not apps:
+        print('（没有读取到工坊应用）')
+        return
+    run_cnt = sum(1 for a in apps if a.get('status') == 'running')
+    print('共 %d 个，运行中 %d 个（由创意工坊平台管理，此处只读）' % (len(apps), run_cnt))
+    print()
+    print(pad('端口', 8) + pad('名称', 34) + pad('状态', 10) + '访问')
+    print('-' * 92)
+    for a in apps:
+        print(pad(a.get('port'), 8) + pad(a.get('name', '')[:32], 34) +
+              pad('运行中' if a.get('status') == 'running' else a.get('status'), 10) +
+              a.get('url', ''))
+
+
+def make_zip(path):
+    """目录打 zip；已是压缩包则原样返回"""
+    if os.path.isfile(path):
+        if zipfile.is_zipfile(path) or path.lower().endswith(('.tar', '.gz', '.tgz')):
+            return path, None
+        die('不是压缩包，也不是目录: %s' % path)
+    if not os.path.isdir(path):
+        die('路径不存在: %s' % path)
+
+    tmp = tempfile.mkdtemp(prefix='dvctl-')
+    zp = os.path.join(tmp, 'bundle.zip')
+    # 注意：dist/build 不能跳过——静态站点常需要它们
+    skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv'}
+    n = 0
+    with zipfile.ZipFile(zp, 'w', zipfile.ZIP_DEFLATED) as z:
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith('._')]
+            for f in files:
+                if f.startswith('._') or f == '.DS_Store':
+                    continue
+                fp = os.path.join(root, f)
+                rel = os.path.relpath(fp, path)
+                try:
+                    z.write(fp, rel)
+                    n += 1
+                except OSError:
+                    pass
+    size = os.path.getsize(zp)
+    print('已打包 %d 个文件，%.2f MB' % (n, size / 1048576.0))
+    return zp, tmp
+
+
+def owner_params(owner=None, owner_name=None):
+    """归属参数：显式传入 > .env 配置 > 不传（记到 admin）"""
+    oid = owner or CFG.get('CONSOLE_OWNER') or ''
+    oname = owner_name or CFG.get('CONSOLE_OWNER_NAME') or ''
+    return oid.strip(), oname.strip()
+
+
+def upload(name, filepath, mysql=False, update=False, owner=None, owner_name=None):
+    boundary = '----dvctl' + uuid.uuid4().hex
+    fn = os.path.basename(filepath)
+    ctype = mimetypes.guess_type(fn)[0] or 'application/octet-stream'
+    with open(filepath, 'rb') as fh:
+        payload = fh.read()
+    body = b''.join([
+        ('--%s\r\n' % boundary).encode(),
+        ('Content-Disposition: form-data; name="file"; filename="%s"\r\n' % fn).encode(),
+        ('Content-Type: %s\r\n\r\n' % ctype).encode(),
+        payload,
+        ('\r\n--%s--\r\n' % boundary).encode(),
+    ])
+    oid, oname = owner_params(owner, owner_name)
+    q = ('upload?name=' + urllib.parse.quote(name)
+         + ('&mysql=1' if mysql else '') + ('&update=1' if update else '')
+         + ('&owner=' + urllib.parse.quote(oid) if oid else '')
+         + ('&ownerName=' + urllib.parse.quote(oname) if oname else ''))
+    return req(q, method='POST', data=body,
+               ctype='multipart/form-data; boundary=' + boundary, timeout=900)
+
+
+def abs_url(path):
+    """把 /apps/xxx 这样的站内路径补成完整地址（服务器可能只开 http）"""
+    if not path:
+        return ''
+    if path.startswith('/'):
+        u = urllib.parse.urlparse(BASE)
+        return '%s://%s%s' % (u.scheme, u.netloc, path)
+    return path
+
+
+def cmd_deploy(args):
+    path = args[0] if args else None
+    name = getopt(args, '--name')
+    if not path or not name:
+        die('用法: dvctl deploy <路径> --name <应用名> [--mysql]')
+    want_db = '--mysql' in args
+    want_update = '--update' in args
+    oid, oname = owner_params(getopt(args, '--owner'), getopt(args, '--owner-name'))
+    zp, tmp = make_zip(path)
+    tags = []
+    if want_update: tags.append('覆盖更新')
+    if want_db: tags.append('含 MySQL 建库')
+    print('上传 → %s%s' % (BASE, '（%s）' % '、'.join(tags) if tags else ''))
+    if oid:
+        print('归属: %s (%s)' % (oname or oid, oid))
+    else:
+        try:
+            me = req('auth/me') or {}
+            u = (me.get('user') or {})
+            if u.get('id') and u.get('id') != 'admin':
+                print('归属: %s (%s) ← 令牌身份' % (u.get('name') or '-', u.get('id')))
+            else:
+                print('归属: admin —— 共享令牌没有个人身份；`dvctl login` 换成自己的令牌')
+        except SystemExit:
+            print('归属: 未知（令牌校验失败）')
+    r = upload(name, zp, mysql=want_db, update=want_update, owner=oid, owner_name=oname)
+    if tmp:
+        shutil.rmtree(tmp, ignore_errors=True)
+    log = r.get('log') or []
+    for line in log:
+        print('  ' + line)
+    if JSON_OUT:
+        return out(r)
+    if r.get('ok'):
+        print('\n部署成功: %s' % abs_url(r.get('access', '')))
+        print('类型: %s%s' % (r.get('type'), ('  端口: %s' % r['port']) if r.get('port') else ''))
+        if r.get('db'):
+            print('数据库: 已创建，连接信息见上方日志与 /opt/apps/%s/.env' % name)
+    else:
+        print('\n部署失败: %s' % (r.get('error') or '未知错误'))
+        sys.exit(1)
+
+
+def cmd_image(args):
+    name = getopt(args, '--name')
+    image = getopt(args, '--image')
+    if not name or not image:
+        die('用法: dvctl image --name <应用名> --image <镜像> [--port 6001] [--cport 3000]')
+    body = {
+        'name': name, 'image': image,
+        'port': int(getopt(args, '--port') or 0) or None,
+        'containerPort': int(getopt(args, '--cport') or 0) or None,
+        'health': getopt(args, '--health') or '/health',
+        'owner': owner_params(getopt(args, '--owner'), getopt(args, '--owner-name'))[0] or None,
+        'ownerName': owner_params(getopt(args, '--owner'), getopt(args, '--owner-name'))[1] or None,
+        'mem': getopt(args, '--mem'),
+        'mysql': '--mysql' in args,
+    }
+    if not body['containerPort']:
+        die('缺少 --cport（容器内监听端口，如 3000）')
+    r = req('deploy', method='POST', data=body)
+    if JSON_OUT:
+        return out(r)
+    print(r.get('output', ''))
+    print('部署成功: %s' % abs_url(r.get('access', '')) if r.get('ok') else '部署失败: %s' % r.get('error', ''))
+    if r.get('ok') and body.get('mysql'):
+        print('数据库: 已创建 app_%s，连接信息见 /opt/apps/%s/.env' % (name.replace('-', '_'), name))
+    if not r.get('ok'):
+        sys.exit(1)
+
+
+def cmd_action(name, action):
+    if action == 'remove' and '-y' not in sys.argv:
+        die('下线会删除容器、nginx 配置和数据目录，确认请加 -y')
+    r = req('apps/%s/actions/%s' % (name, action), method='POST', data={})
+    if JSON_OUT:
+        return out(r)
+    print(r.get('output') or r.get('error') or '完成')
+    if not r.get('ok', True):
+        sys.exit(1)
+
+
+def cmd_logs(name, n=200):
+    r = req('apps/%s/logs?lines=%s' % (name, n))
+    if JSON_OUT:
+        return out(r)
+    print(r.get('logs') or '(无日志)')
+
+
+def cmd_open(name):
+    apps = req('apps')
+    for a in apps:
+        if a['name'] == name:
+            print(a['access'])
+            return
+    die('应用不存在: %s' % name)
+
+
+def save_env(token):
+    """把令牌写进 .env，并去掉 CONSOLE_OWNER（身份由令牌决定，不再需要手工声明）"""
+    lines, found = [], False
+    try:
+        src = open(ENV_FILE, encoding='utf-8').read().splitlines()
+    except FileNotFoundError:
+        src = ['CONSOLE_URL=' + BASE]
+    for line in src:
+        k = line.split('=', 1)[0].strip() if '=' in line else ''
+        if k == 'CONSOLE_TOKEN':
+            lines.append('CONSOLE_TOKEN=' + token)
+            found = True
+        elif k in ('CONSOLE_OWNER', 'CONSOLE_OWNER_NAME'):
+            continue
+        else:
+            lines.append(line)
+    if not found:
+        lines.append('CONSOLE_TOKEN=' + token)
+    out = '\n'.join([x for x in lines if x.strip() != ''] ) + '\n'
+    with open(ENV_FILE, 'w', encoding='utf-8') as fh:
+        fh.write(out)
+    try:
+        os.chmod(ENV_FILE, 0o600)
+    except Exception:
+        pass
+
+
+def cmd_login(args):
+    """换成自己的令牌：之后发布的应用自动归到自己名下"""
+    global TOKEN
+    tok = (getopt(args, '--token') or '').strip()
+    if not tok:
+        print('用自己的账号生成令牌：控制台 → 设置 → 脚本令牌 → 生成')
+        print('  %s/#settings' % BASE)
+        print('（用共享管理员令牌发布，应用会一律记到 admin）\n')
+        try:
+            tok = input('粘贴令牌: ').strip()
+        except (EOFError, KeyboardInterrupt):
+            die('已取消')
+    if not tok:
+        die('没有输入令牌')
+
+    old, TOKEN = TOKEN, tok
+    try:
+        me = req('auth/me')
+    except SystemExit:
+        TOKEN = old
+        die('令牌无效（校验失败），没有写入配置')
+    user = (me or {}).get('user') or {}
+    if not user.get('id'):
+        TOKEN = old
+        die('令牌无效（没有返回身份），没有写入配置')
+
+    save_env(tok)
+    print('已登录: %s (%s) · %s' % (user.get('name') or '-', user.get('id'),
+                                    '管理员' if me.get('isAdmin') else '成员'))
+    print('配置已写入 %s' % ENV_FILE)
+    print('之后这个账号发布的应用都归自己，不再需要 CONSOLE_OWNER')
+
+
+def cmd_doctor():
+    print('配置   %s' % ENV_FILE)
+    print('地址   %s' % BASE)
+    print('令牌   %s' % ('已配置 (%d 字符)' % len(TOKEN) if TOKEN else '未配置'))
+    o = req('overview')
+    print('连通   正常 · 主机 %s · Docker %s' % (o.get('host'), 'OK' if o.get('dockerOk') else '异常'))
+    apps = req('apps')
+    print('应用   %d 个' % len(apps))
+
+
+def cmd_whoami():
+    oid, oname = owner_params()
+    me = req('auth/me') or {}
+    user = me.get('user') or {}
+    apps = req('apps') or []
+    print('控制台: %s' % BASE)
+    print('令牌: %s%s' % (TOKEN[:6] + '…' if len(TOKEN) > 6 else '(空)', '（%d 字符）' % len(TOKEN) if TOKEN else ''))
+    print('身份: %s (%s) · %s' % (user.get('name') or '-', user.get('id') or '-',
+                                 '管理员' if me.get('isAdmin') else '成员'))
+    if oid:
+        print('发布归属: %s (%s) ← CONSOLE_OWNER' % (oname or oid, oid))
+    elif user.get('id') == 'admin':
+        print('发布归属: admin（共享令牌，无个人身份）—— 建议 `dvctl login` 换成自己的令牌')
+    else:
+        print('发布归属: %s (%s) ← 令牌身份' % (user.get('name'), user.get('id')))
+    print('可见应用: %d 个' % len(apps))
+
+
+def getopt(args, key):
+    if key in args:
+        i = args.index(key)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
+USAGE = __doc__
+
+def main():
+    a = [x for x in sys.argv[1:] if x != '--json']
+    if not a or a[0] in ('-h', '--help', 'help'):
+        print(USAGE)
+        return
+    cmd, rest = a[0], a[1:]
+
+    if cmd == 'apps': return cmd_apps()
+    if cmd == 'overview': return cmd_overview()
+    if cmd == 'ports': return cmd_ports()
+    if cmd == 'vibe': return cmd_vibe()
+    if cmd == 'doctor': return cmd_doctor()
+    if cmd == 'whoami': return cmd_whoami()
+    if cmd == 'login': return cmd_login(rest)
+    if cmd == 'deploy': return cmd_deploy(rest)
+    if cmd == 'image': return cmd_image(rest)
+    if cmd == 'open':
+        if not rest: die('用法: dvctl open <应用名>')
+        return cmd_open(rest[0])
+    if cmd == 'logs':
+        if not rest: die('用法: dvctl logs <应用名> [-n 200]')
+        return cmd_logs(rest[0], getopt(rest, '-n') or 200)
+    if cmd in ('restart', 'stop', 'start', 'rollback', 'remove'):
+        if not rest: die('用法: dvctl %s <应用名>' % cmd)
+        return cmd_action(rest[0], cmd)
+    die('未知命令: %s\n\n%s' % (cmd, USAGE))
+
+
+if __name__ == '__main__':
+    main()

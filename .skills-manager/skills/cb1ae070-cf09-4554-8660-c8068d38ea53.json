@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "skill_id": "cb1ae070-cf09-4554-8660-c8068d38ea53",
+  "path": "realsee-login-integration",
+  "path_key": "realsee-login-integration",
+  "enabled": true,
+  "tags": [],
+  "source": {
+    "type": "local",
+    "ref": null,
+    "subpath": null,
+    "branch": null
+  }
+}
