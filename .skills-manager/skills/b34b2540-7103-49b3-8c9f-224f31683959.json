@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "skill_id": "b34b2540-7103-49b3-8c9f-224f31683959",
+  "path": "manage-taskboard",
+  "path_key": "manage-taskboard",
+  "enabled": true,
+  "tags": [],
+  "source": {
+    "type": "import",
+    "ref": null,
+    "subpath": null,
+    "branch": null
+  }
+}
