@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "skill_id": "52d4d3e9-beb1-438c-abcb-d47bd0bf4b52",
+  "path": "ub-mode",
+  "path_key": "ub-mode",
+  "enabled": true,
+  "tags": [],
+  "source": {
+    "type": "git",
+    "ref": "https://github.com/unclebob/ub-mode",
+    "subpath": null,
+    "branch": null
+  }
+}
