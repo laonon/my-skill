@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "skill_id": "6b2ff69e-01d4-480d-8092-2e877de0c89a",
+  "path": "chrome-extensions",
+  "path_key": "chrome-extensions",
+  "enabled": true,
+  "tags": [],
+  "source": {
+    "type": "git",
+    "ref": "https://github.com/GoogleChrome/modern-web-guidance/tree/main/skills/chrome-extensions",
+    "subpath": "skills/chrome-extensions",
+    "branch": "main"
+  }
+}

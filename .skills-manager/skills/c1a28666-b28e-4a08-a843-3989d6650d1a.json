@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "skill_id": "c1a28666-b28e-4a08-a843-3989d6650d1a",
+  "path": "modern-web-guidance",
+  "path_key": "modern-web-guidance",
+  "enabled": true,
+  "tags": [],
+  "source": {
+    "type": "git",
+    "ref": "https://github.com/GoogleChrome/modern-web-guidance/tree/main/skills/modern-web-guidance",
+    "subpath": "skills/modern-web-guidance",
+    "branch": "main"
+  }
+}
