@@ -25,6 +25,7 @@ dvctl — 开发机部署控制台 CLI
   dvctl restart|stop|start|rollback|remove <名> [-y]
   dvctl open <名>                  打印访问地址
   dvctl doctor                     检查连通性与令牌
+  dvctl --version                  看 skill 包版本
 
 数据库: deploy / image 都可加 --mysql，自动建库（app_<名>）并注入容器
 通用参数: --json 输出原始 JSON
@@ -476,6 +477,15 @@ def cmd_login(args):
 
 
 
+def skill_version():
+    """包版本号：打包时写在 skill 根目录的 VERSION 里"""
+    try:
+        with open(os.path.join(os.path.dirname(HERE), 'VERSION'), encoding='utf-8') as fh:
+            return fh.read().strip() or 'dev'
+    except Exception:
+        return 'dev'
+
+
 def probe(path):
     """不 die 的请求：返回 (status, data)。0 表示网络层失败。"""
     url = BASE + '/api/' + path.lstrip('/')
@@ -609,6 +619,10 @@ def main():
         print(USAGE)
         return
     cmd, rest = a[0], a[1:]
+
+    if cmd in ('--version', '-V', 'version'):
+        print('devbox-deploy ' + skill_version())
+        return
 
     if cmd == 'apps': return cmd_apps()
     if cmd == 'overview': return cmd_overview()

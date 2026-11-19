@@ -17,6 +17,8 @@ ROOT="$(cd "$HERE/.." && pwd)"
 DV="$HERE/dvctl"
 
 echo "== devbox-deploy 初始化 =="
+VER="$(cat "$ROOT/VERSION" 2>/dev/null || echo dev)"
+echo "版本: $VER"
 echo "目录: $ROOT"
 
 # 常见 AI 工具的 skills 目录（只是提示，放别处也能正常用）
