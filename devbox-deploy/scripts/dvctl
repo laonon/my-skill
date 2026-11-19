@@ -20,6 +20,7 @@ dvctl — 开发机部署控制台 CLI
   dvctl whoami                     看令牌身份与发布归属配置
   dvctl login [--token <令牌>]     换成自己的访问令牌（之后发布都归自己）
   dvctl image --name <名> --image <镜像> [--port 6001] [--cport 3000]
+  dvctl limits <名> [--mem 1g] [--cpus 2]   调 CPU/内存上限（容器重建 2-5 秒）
   dvctl logs <名> [-n 200]
   dvctl restart|stop|start|rollback|remove <名> [-y]
   dvctl open <名>                  打印访问地址
@@ -544,6 +545,26 @@ def cmd_setup(args):
     return 0
 
 
+
+def cmd_limits(args):
+    """调容器应用的 CPU / 内存上限（同控制台「资源限额」，会重建容器）"""
+    if not args:
+        die('用法: dvctl limits <应用名> [--mem 1g] [--cpus 2]')
+    name = args[0]
+    mem = getopt(args, '--mem')
+    cpus = getopt(args, '--cpus')
+    if not mem and not cpus:
+        die('至少给一个: --mem 1g / --cpus 2')
+    body = {}
+    if mem: body['mem'] = mem
+    if cpus: body['cpus'] = cpus
+    r = req('apps/' + urllib.parse.quote(name) + '/limits', method='POST', data=body) or {}
+    if r.get('error'):
+        die(r['error'])
+    print('已调整 %s: mem=%s cpus=%s' % (name, r.get('mem') or mem or '不变', r.get('cpus') or cpus or '不变'))
+    print('重新发布不会重置这两个值（appctl 没显式给参数时沿用 deploy.json）')
+
+
 def cmd_doctor():
     print('配置   %s' % ENV_FILE)
     print('地址   %s' % BASE)
@@ -597,6 +618,7 @@ def main():
     if cmd == 'whoami': return cmd_whoami()
     if cmd == 'login': return cmd_login(rest)
     if cmd == 'setup': sys.exit(cmd_setup(rest))
+    if cmd == 'limits': return cmd_limits(rest)
     if cmd == 'deploy': return cmd_deploy(rest)
     if cmd == 'image': return cmd_image(rest)
     if cmd == 'open':

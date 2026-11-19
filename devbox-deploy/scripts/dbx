@@ -8,8 +8,10 @@
 #   dbx sh                        交互式 shell
 set -uo pipefail
 
-ENV_FILE="$HOME/.workbuddy/skills/devbox-deploy/.env"
-[[ -f "$ENV_FILE" ]] || { echo "缺少配置文件: $ENV_FILE" >&2; exit 1; }
+# 配置来自 skill 目录下的 .env（跟安装位置无关）；可用 $DEVCLOUD_ENV 指定别处
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ENV_FILE="${DEVCLOUD_ENV:-$ROOT_DIR/.env}"
+[[ -f "$ENV_FILE" ]] || { echo "缺少配置文件: $ENV_FILE（先跑 scripts/setup.sh，或从 .env.example 复制）" >&2; exit 1; }
 
 getval() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$//'; }
 HOST=$(getval DEVBOX_HOST); USER_=$(getval DEVBOX_USER); PASS=$(getval DEVBOX_PASS)

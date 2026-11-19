@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# 构建并同步 /Users/mmk/Gitlab/realsee-dev 到开发机 /solutions/
-# 用法：deploy-realsee-dev [项目路径]
+# 构建并同步 realsee-dev 静态站到开发机 /solutions/
+# 用法：deploy-realsee-dev <项目路径>   （或设置 REALSEE_DEV_DIR）
 set -euo pipefail
 
-PROJECT="${1:-/Users/mmk/Gitlab/realsee-dev}"
+PROJECT="${1:-${REALSEE_DEV_DIR:-}}"
+[[ -n "$PROJECT" ]] || { echo "用法: deploy-realsee-dev <realsee-dev 项目路径>（或设 REALSEE_DEV_DIR）" >&2; exit 2; }
+[[ -f "$PROJECT/bin/build.mjs" ]] || { echo "这不像 realsee-dev 项目（缺 bin/build.mjs）: $PROJECT" >&2; exit 2; }
 BASE_PATH="/solutions/"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DBX="$HERE/dbx"

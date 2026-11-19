@@ -19,9 +19,13 @@ DV="$HERE/dvctl"
 echo "== devbox-deploy 初始化 =="
 echo "目录: $ROOT"
 
-CANON="$HOME/.workbuddy/skills/devbox-deploy"
-if [ "$ROOT" != "$CANON" ]; then
-  echo "提示: skill 的惯例位置是 ${CANON}（不在这里也能用，只是 skill 检索可能找不到）"
+# 常见 AI 工具的 skills 目录（只是提示，放别处也能正常用）
+CANON=""
+for base in "$HOME/.workbuddy/skills" "$HOME/.claude/skills" "$HOME/.config/agent-skills"; do
+  if [ -d "$base" ]; then CANON="$base/devbox-deploy"; break; fi
+done
+if [ -n "$CANON" ] && [ "$ROOT" != "$CANON" ]; then
+  echo "提示: 惯例位置是 ${CANON}（现在在 ${ROOT}，功能不受影响，只是工具可能检索不到这个 skill）"
   echo "      mv \"$ROOT\" \"${CANON}\" 然后重跑 ${CANON}/scripts/setup.sh"
 fi
 

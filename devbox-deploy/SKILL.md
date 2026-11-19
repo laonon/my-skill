@@ -14,11 +14,22 @@ description: 把应用部署到开发机（guide.realsee.cn / 10.33.207.254）�
 
 ## 安装与初始化（一条命令）
 
-拿到压缩包后先解压到 **`~/.workbuddy/skills/devbox-deploy/`**（目录名保持 `devbox-deploy`），然后执行：
+解压到**你的 AI 工具的 skills 目录**，目录名保持 `devbox-deploy`：
+
+| 工具 | 目录 |
+|---|---|
+| WorkBuddy | `~/.workbuddy/skills/devbox-deploy/` |
+| Claude Code | `~/.claude/skills/devbox-deploy/` |
+| 其他 / 临时用 | 任意目录都行，脚本不依赖位置 |
+
+然后执行（把路径换成你的实际目录）：
 
 ```bash
-bash ~/.workbuddy/skills/devbox-deploy/scripts/setup.sh
+bash <skill目录>/scripts/setup.sh
 ```
+
+这个包不依赖任何特定 agent：主链路只要 `python3` + `bash`；SSH 兜底（`scripts/dbx`）额外需要 `expect`（macOS 自带，Debian/Ubuntu 装 `expect` 包）。文档里的路径统一写成
+`$SK`（skill 目录），按你的实际位置替换即可。
 
 这个脚本会依次做完，缺什么补什么，可以重复跑：
 
@@ -56,7 +67,8 @@ bash ~/.workbuddy/skills/devbox-deploy/scripts/setup.sh
 先跑 `scripts/dvctl doctor` 探活，通了就别用 SSH。
 
 ```bash
-DV=~/.workbuddy/skills/devbox-deploy/scripts/dvctl
+SK=<你的 skill 目录>          # 例如 ~/.workbuddy/skills/devbox-deploy
+DV=$SK/scripts/dvctl
 $DV doctor
 ```
 
@@ -77,6 +89,7 @@ $DV logs <name> [-n 200]     # 容器日志（静态站点返回文件清单）
 
 $DV deploy <路径> --name <n> [--mysql] [--update]  # 上传并部署（--update 覆盖已有应用）
 $DV image --name <n> --image <ref> --cport 3000 [--port 6001] [--health /health] [--mem 512m] [--mysql]
+$DV limits <n> [--mem 1g] [--cpus 2]   # 调限额，容器重建 2-5 秒
 
 $DV restart|stop|start <name>
 $DV rollback <name>          # 回滚到上一版镜像
@@ -314,12 +327,12 @@ sudo vibe-sync      # 重新生成 4401-4428 的 server 块与 iframe 包装页�
 ## 3.3 解决方案站点（realsee-dev / 内网蓝皮书）
 
 首页「解决方案」指向 `https://guide.realsee.cn/solutions/`，内容是本地项目
-`/Users/mmk/Gitlab/realsee-dev`（静态站，`bin/build.mjs` 产出 `dist/`）。
+`<你的 realsee-dev 仓库>`（静态站，`bin/build.mjs` 产出 `dist/`）。
 
 **一条命令同步更新**（改完 content/ 或 config 后）：
 
 ```bash
-~/.workbuddy/skills/devbox-deploy/scripts/deploy-realsee-dev
+$SK/scripts/deploy-realsee-dev
 ```
 
 脚本做的事：`BLUEBOOK_BASE=/solutions/ npm run build` → 打包 → 上传 →
@@ -916,7 +929,13 @@ cpus: 4.0         # CPU 上限（CFS 配额，不是预留）
 | 控制台卡片「更多 → 资源限额」 | 弹窗填内存 / CPU，保存后容器重建（2-5 秒短断），`data/` `logs/` 保留 |
 | `appctl limits <app> --mem 1g --cpus 2` | 命令行同一个动作；只写指定的项，另一项保持原值 |
 
-改完 `deploy.json` 会同步记下 `mem` / `cpus`，控制台列表能读到；重新部署时也可以在镜像部署表单里带上。
+`dvctl limits <app> --mem 1g --cpus 2` 与上面等价，适合 agent / 脚本调用。
+
+改完 `deploy.json` 会同步记下 `mem` / `cpus`，控制台列表能读到。
+
+**重新发布不会重置限额**：上传或镜像部署时没显式给 `--mem` / `--cpus`，
+`appctl` 会按 `deploy.json` → `docker-compose.yml` → 默认值的顺序沿用上次的配置。
+默认值（512m / 1 核）只对**新建**应用生效。所以调好之后尽管重新发布，配额不会被冲掉。
 
 ### 内存配额保护
 
@@ -946,7 +965,7 @@ cpus: 4.0         # CPU 上限（CFS 配额，不是预留）
 ## 5. SSH 兜底（dbx）
 
 ```bash
-DBX=~/.workbuddy/skills/devbox-deploy/scripts/dbx
+DBX=$SK/scripts/dbx
 $DBX run "appctl list"             # guanfu 身份
 $DBX root "systemctl reload nginx" # root 身份
 $DBX put ./dist /tmp/build-x       # 传文件（目录会嵌套，目标写父目录）
