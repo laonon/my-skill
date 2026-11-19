@@ -54,7 +54,7 @@ bash <skill目录>/scripts/setup.sh
    - 让用户打开 <https://guide.realsee.cn/apps/console/>（如视账号登录），把弹窗里那行 `dvctl login --token ...` 复制给你；
    - 你执行它，再跑一次 `dvctl whoami` 确认身份；
    - 全程不要替用户编造令牌，也不要借用别人的令牌。
-3. **连通性异常先降级排查**：`dvctl doctor` 连不上时，先怀疑网络/VPN，再试 `scripts/dbx`（SSH 兜底，需要 `.env` 里的 `DEVBOX_PASS`）。
+3. **连通性异常先降级排查**：`dvctl doctor` 连不上时，先怀疑网络/VPN，再试 `scripts/dbx`（SSH 兜底，需要 `.env` 里的 `DEVBOX_KEY`；没有密钥就没有这条通道）。
 4. **发布后必须验证**：`dvctl apps` 看状态、`curl -o /dev/null -w '%{http_code}'` 看 URL 是否 200，不要只看命令返回 0 就宣布成功。
 
 ## 0. 通道选择：先 API，后 SSH
@@ -72,7 +72,8 @@ DV=$SK/scripts/dvctl
 $DV doctor
 ```
 
-配置在 skill 目录 `.env`（`600` 权限）：`CONSOLE_URL` 与 `CONSOLE_TOKEN`（后者存**你自己的个人令牌**），`DEVBOX_HOST` / `DEVBOX_USER` / `DEVBOX_PASS`（仅 SSH 兜底用）。
+配置在 skill 目录 `.env`（`600` 权限）：`CONSOLE_URL` 与 `CONSOLE_TOKEN`（后者存**你自己的个人令牌**）；
+SSH 兜底另需 `DEVBOX_HOST` / `DEVBOX_USER` / `DEVBOX_KEY`（密钥路径），`DEVBOX_PASS` 只在 `dbx root` 提权时用到。
 
 > 沙箱注意：ssh 调用必须带 `-o PubkeyAuthentication=no -o PreferredAuthentications=password`，
 > 否则会被拦。统一用 `scripts/dbx`，不要手写 ssh。
@@ -798,6 +799,9 @@ dvctl whoami          # 应显示：王明 (36184089396510730) · 管理员
   接口层是 `?owner=<id>`。成员带这个参数无效
 - 归属写定后**不会**被后续发布改掉（只有完全没有归属的应用才会被首次发布认领）。
   真要转移，用控制台应用编辑弹窗里的「归属人 ID」
+- **开发机只认密钥登录**：SSH 密码已关闭，`scripts/dbx` 也走 key（`DEVBOX_KEY`，
+  默认 `~/.ssh/id_ed25519_devcloud`）；没有这把 key 的人只能通过平台/skill 发布，
+  拿不到机器上的任何文件与配置
 - CI / 机器人：在「用户 → 服务账号」里建独立令牌账号，不要复用真人的令牌
 
 ## 3.10 应用展示信息（标题 / 描述 / 封面 / 默认链接）
@@ -936,6 +940,21 @@ cpus: 4.0         # CPU 上限（CFS 配额，不是预留）
 **重新发布不会重置限额**：上传或镜像部署时没显式给 `--mem` / `--cpus`，
 `appctl` 会按 `deploy.json` → `docker-compose.yml` → 默认值的顺序沿用上次的配置。
 默认值（512m / 1 核）只对**新建**应用生效。所以调好之后尽管重新发布，配额不会被冲掉。
+
+### 发布前的三条闸门
+
+| 闸门 | 默认 | 行为 |
+|---|---|---|
+| 每人应用数 | 5 个（管理员不限） | 超了直接拒绝，提示先下线不用的应用 |
+| 单应用磁盘 | 20 GB（可按应用覆盖 `disk_quota`） | 发布前若该应用已超上限就拒绝，先清理或调高 |
+| 全机磁盘水位 | 85% | 超过后所有人都不能发布（含管理员） |
+
+调整方式：管理员在应用卡片「更多 → 资源限额」里填「磁盘上限（GB）」，
+或 `dvctl limits <应用> --disk 50`；全局默认在控制台 `.env`：
+`MAX_APPS_PER_USER` / `DISK_QUOTA_GB` / `DISK_BUDGET_PCT`。
+
+> 磁盘上限只做发布前拦截，不会杀进程、不限制容器写入。真要立刻止血，
+> 用「资源限额」把内存调小，或下线应用。
 
 ### 内存配额保护
 

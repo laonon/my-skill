@@ -15,9 +15,19 @@ ENV_FILE="${DEVCLOUD_ENV:-$ROOT_DIR/.env}"
 
 getval() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$//'; }
 HOST=$(getval DEVBOX_HOST); USER_=$(getval DEVBOX_USER); PASS=$(getval DEVBOX_PASS)
-[[ -n "$HOST" && -n "$USER_" && -n "$PASS" ]] || { echo ".env 不完整（需要 DEVBOX_HOST/USER/PASS）" >&2; exit 1; }
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PubkeyAuthentication=no -o PreferredAuthentications=password -o ConnectTimeout=15"
+# 认证方式：优先用密钥（机器只认 key，密码登录已关闭），没有 key 才退回密码
+KEY="${DEVBOX_KEY:-$(getval DEVBOX_KEY)}"
+KEY="${KEY:-$HOME/.ssh/id_ed25519_devcloud}"
+KEY="${KEY/#\~/$HOME}"
+
+[[ -n "$HOST" && -n "$USER_" ]] || { echo ".env 不完整（需要 DEVBOX_HOST / DEVBOX_USER）" >&2; exit 1; }
+[[ -f "$KEY" || -n "$PASS" ]] || { echo "既没有密钥 $KEY，也没有 DEVBOX_PASS，无法登录" >&2; exit 1; }
+if [[ -f "$KEY" ]]; then
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15 -i $KEY -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey"
+else
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=15 -o PubkeyAuthentication=no -o PreferredAuthentications=password"
+fi
 
 # 远端执行：命令经环境变量传入 expect，避免 tcl 解析与 argv 语义问题
 ssh_run() {
@@ -68,6 +78,10 @@ case "$cmd" in
     ;;
   root)
     [[ -n "${1:-}" ]] || { echo '用法: dbx root "<command>"' >&2; exit 1; }
+    [[ -n "$PASS" ]] || { echo "dbx root 需要 DEVBOX_PASS（sudo 认证），当前为空" >&2; exit 1; }
+    # 先把 sudo 密码同步到远端（密码轮换后旧文件会失效，导致 sudo -S 空转）
+    pw64=$(printf '%s' "$PASS" | base64 | tr -d '\n')
+    ssh_run "umask 077; printf '%s' '$pw64' | base64 -d > ~/.sudo_pw" >/dev/null 2>&1
     b64=$(printf '%s' "$1" | base64 | tr -d '\n')
     ssh_run "printf '%s' '$b64' | base64 -d > /tmp/.dbx_cmd.sh && sudo -S -k bash /tmp/.dbx_cmd.sh < ~/.sudo_pw"
     ;;
