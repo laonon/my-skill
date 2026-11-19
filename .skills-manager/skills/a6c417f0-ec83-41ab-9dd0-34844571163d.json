@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "skill_id": "a6c417f0-ec83-41ab-9dd0-34844571163d",
+  "path": "devbox-deploy",
+  "path_key": "devbox-deploy",
+  "enabled": true,
+  "tags": [],
+  "source": {
+    "type": "local",
+    "ref": null,
+    "subpath": null,
+    "branch": null
+  }
+}

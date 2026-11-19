@@ -1,0 +1,101 @@
+#!/bin/bash
+# dbx — 开发机操作封装
+# 用法:
+#   dbx run  "<command>"          以 DEVBOX_USER 执行
+#   dbx root "<command>"          以 root 执行（sudo）
+#   dbx put  <local> <remote>     上传文件/目录（scp -r）
+#   dbx get  <remote> <local>     下载文件/目录
+#   dbx sh                        交互式 shell
+set -uo pipefail
+
+ENV_FILE="$HOME/.workbuddy/skills/devbox-deploy/.env"
+[[ -f "$ENV_FILE" ]] || { echo "缺少配置文件: $ENV_FILE" >&2; exit 1; }
+
+getval() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$//'; }
+HOST=$(getval DEVBOX_HOST); USER_=$(getval DEVBOX_USER); PASS=$(getval DEVBOX_PASS)
+[[ -n "$HOST" && -n "$USER_" && -n "$PASS" ]] || { echo ".env 不完整（需要 DEVBOX_HOST/USER/PASS）" >&2; exit 1; }
+
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o PubkeyAuthentication=no -o PreferredAuthentications=password -o ConnectTimeout=15"
+
+# 远端执行：命令经环境变量传入 expect，避免 tcl 解析与 argv 语义问题
+ssh_run() {
+    DBX_CMD="$1" expect -c '
+set timeout 1800
+log_user 1
+spawn ssh '"$SSH_OPTS"' '"$USER_@$HOST"' $env(DBX_CMD)
+expect {
+  -re "(yes/no|fingerprint)" { send "yes\r"; exp_continue }
+  -re "\[Pp\]assword:" { send "'"$PASS"'\r"; exp_continue }
+  eof
+}
+' 2>&1 | sed -e '/^spawn ssh /d'
+}
+
+scp_run() {
+    DBX_SRC="$1" DBX_DST="$2" expect -c '
+set timeout 3600
+log_user 1
+spawn scp -r '"$SSH_OPTS"' $env(DBX_SRC) '"$USER_@$HOST"':$env(DBX_DST)
+expect {
+  -re "(yes/no|fingerprint)" { send "yes\r"; exp_continue }
+  -re "\[Pp\]assword:" { send "'"$PASS"'\r"; exp_continue }
+  eof
+}
+' 2>&1 | sed -e '/^spawn scp /d'
+}
+
+scp_get_run() {
+    DBX_SRC="$1" DBX_DST="$2" expect -c '
+set timeout 3600
+log_user 1
+spawn scp -r '"$SSH_OPTS"' '"$USER_@$HOST"':$env(DBX_SRC) $env(DBX_DST)
+expect {
+  -re "(yes/no|fingerprint)" { send "yes\r"; exp_continue }
+  -re "\[Pp\]assword:" { send "'"$PASS"'\r"; exp_continue }
+  eof
+}
+' 2>&1 | sed -e '/^spawn scp /d'
+}
+
+cmd=${1:-}; shift || true
+
+case "$cmd" in
+  run)
+    [[ -n "${1:-}" ]] || { echo '用法: dbx run "<command>"' >&2; exit 1; }
+    ssh_run "$1"
+    ;;
+  root)
+    [[ -n "${1:-}" ]] || { echo '用法: dbx root "<command>"' >&2; exit 1; }
+    b64=$(printf '%s' "$1" | base64 | tr -d '\n')
+    ssh_run "printf '%s' '$b64' | base64 -d > /tmp/.dbx_cmd.sh && sudo -S -k bash /tmp/.dbx_cmd.sh < ~/.sudo_pw"
+    ;;
+  put)
+    [[ -n "${1:-}" && -n "${2:-}" ]] || { echo "用法: dbx put <local> <remote>" >&2; exit 1; }
+    [[ -e "$1" ]] || { echo "本地路径不存在: $1" >&2; exit 1; }
+    ssh_run "mkdir -p '$2'" >/dev/null 2>&1
+    scp_run "$1" "$2"
+    echo "上传完成: $2"
+    ;;
+  get)
+    [[ -n "${1:-}" && -n "${2:-}" ]] || { echo "用法: dbx get <remote> <local>" >&2; exit 1; }
+    mkdir -p "$2"
+    scp_get_run "$1" "$2"
+    echo "下载完成: $2"
+    ;;
+  sh)
+    expect -c '
+set timeout 1800
+spawn ssh '"$SSH_OPTS"' '"$USER_@$HOST"'
+expect {
+  -re "(yes/no|fingerprint)" { send "yes\r"; exp_continue }
+  -re "\[Pp\]assword:" { send "'"$PASS"'\r"; exp_continue }
+  eof
+}
+interact
+' 2>&1 | sed -e '/^spawn ssh /d'
+    ;;
+  *)
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac
